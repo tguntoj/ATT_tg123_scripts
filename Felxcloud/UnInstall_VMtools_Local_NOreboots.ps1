@@ -285,8 +285,8 @@ if($vmToolsGUID){
 
 else { Write-Host " VMware tool Uninstallation: VMware Tools is not installed." -ForegroundColor Green}
 
-Write-Hos "ToolsRemove_status  $ToolsRemove_status "
-Write-Hos "comment $comment"
+Write-Host "ToolsRemove_status  $ToolsRemove_status "
+Write-Host "comment $comment"
 
 try{Stop-Transcript -ErrorAction ignore|Out-Null}catch{}
      
