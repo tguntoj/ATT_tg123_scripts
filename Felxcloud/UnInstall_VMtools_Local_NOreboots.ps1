@@ -1,6 +1,5 @@
 ﻿Write-Host ""
 Write-Host "This Script is use for remove the VMware tools from local servers" -ForegroundColor green
-Start-Sleep 2
 
 try {
     Set-ExecutionPolicy Bypass -Scope Process -Force
@@ -18,89 +17,75 @@ function Get-VMwareToolsInstallerID {
     }
 }
 
-Write-Host " "
-$datafolder = "C:/Temp/Rehome"
-if (-not (Test-Path -Path $DataFolder -ErrorAction Ignore)) {
-    New-Item $DataFolder -Type Directory | Out-Null
+$datafolder = Join-Path $env:ProgramData 'VMwareToolsUninstall'
+if (-not (Test-Path -Path $datafolder)) {
+    New-Item -Path $datafolder -ItemType Directory -Force | Out-Null
 }
 
-try { Stop-Transcript -ErrorAction ignore | Out-Null } catch {}
-try { Start-Transcript "$datafolder/Task1_VMtools_Uninstall_script_log.txt" } catch {}
+$ToolsRemove_status = 'Failed'
+$comment = 'The uninstall script did not complete.'
 
-write-host " Script start time :      $( Get-Date -Format "M/d/yyyy, h:mm:ss tt")"
+try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
+try { Start-Transcript (Join-Path $datafolder 'Task1_VMtools_Uninstall_script_log.txt') -ErrorAction Stop | Out-Null } catch {}
 
-#region code finding the server model
-# KVM model is     "CloudStack KVM Hypervisor"
-# Vmwware model is "VMware Virtual Platform"
+Write-Host "Script start time: $(Get-Date -Format 'M/d/yyyy, h:mm:ss tt')"
+
+#region Find the server model
+# KVM model is "CloudStack KVM Hypervisor"
+# VMware model is "VMware Virtual Platform"
 try {
-    $sysmodel = (Get-WmiObject Win32_ComputerSystem | Select-Object Model).model
+    $sysmodel = (Get-WmiObject Win32_ComputerSystem | Select-Object -ExpandProperty Model)
 }
 catch {
-    $sysmodel = (systeminfo | Select-String "System Model") -replace ".*System Model:\s+",""
+    $sysmodel = (systeminfo | Select-String "System Model") -replace ".*System Model:\s+", ""
 }
 
-#$sysmodel = "CloudStack KVM Hypervisor"
-
-if ($sysmodel -eq "CloudStack KVM Hypervisor") {
-    write-host " Server is in CloudStack KVM Hypervisor"
+if ($sysmodel -eq 'CloudStack KVM Hypervisor') {
+    Write-Host 'Server is in CloudStack KVM Hypervisor'
 }
 else {
-    write-host " Server is not in CloudStack KVM Hypervisor" -ForegroundColor Magenta
-    $table = @()
-    $table = [pscustomobject]@{
-        Server     = $Server
-        ToolsRemove = "Server not in KVM"
-    }
-
-    $table
-    return
+    Write-Host 'Server is not in CloudStack KVM Hypervisor; uninstall skipped.' -ForegroundColor Magenta
+    $ToolsRemove_status = 'NotApplicable'
+    $comment = 'Server is not running on the supported CloudStack KVM hypervisor.'
+    Write-Host "ToolsRemove_status: $ToolsRemove_status"
+    Write-Host "comment: $comment"
+    try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
+    exit 0
 }
-#endregion code finding the server model
+#endregion Find the server model
 
-#Main code ##### Unistall VMware tools #####
-
-$vmToolsdata = (Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -like "*VMware Tools*" })
-
+# Main code: uninstall VMware Tools
+$vmToolsdata = Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -like '*VMware Tools*' }
 $vmToolsver = $vmToolsdata.Version
 $vmToolsGUID = $vmToolsdata.IdentifyingNumber
 
 if ($vmToolsGUID) {
+    Write-Host "$(systeminfo | find 'System Boot Time')"
+    Write-Host "VMware Tools version $vmToolsver"
 
-    write-host " $(systeminfo | find "System Boot Time")"
-    Write-host "VMware tools version $vmToolsver"
-
-    # This script will manually rip out all VMware Tools registry entries and files for Windows 2008-2019
-    # associated with the MSI for VMware Tools.
-    # step1
-    #region code Finding the VMware tools services, files and registry _step1
-
-    Write-Host "Step-1 : Finding the VMware tools services, files and registry " -ForegroundColor Yellow
+    # This script manually removes VMware Tools registry entries and files.
+    # Step 1: Find VMware Tools services, files, and registry entries.
+    Write-Host 'Step-1: Finding VMware Tools services, files, and registry entries' -ForegroundColor Yellow
 
     $vmware_tools_ids = Get-VMwareToolsInstallerID
-    if ($vmware_tools_ids) { Write-Host " VMware tools V $vmToolsver found in server" }
+    if ($vmware_tools_ids) { Write-Host "VMware Tools version $vmToolsver found on server" }
 
-    # Targets we can hit with the common registry ID from $vmware_tools_ids.reg_id
     $reg_targets = @(
-        "Registry::HKEY_CLASSES_ROOT\Installer\Features\",
-        "Registry::HKEY_CLASSES_ROOT\Installer\Products\",
-        "HKLM:\SOFTWARE\Classes\Installer\Features\",
-        "HKLM:\SOFTWARE\Classes\Installer\Products\",
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products\"
+        'Registry::HKEY_CLASSES_ROOT\Installer\Features\',
+        'Registry::HKEY_CLASSES_ROOT\Installer\Products\',
+        'HKLM:\SOFTWARE\Classes\Installer\Features\',
+        'HKLM:\SOFTWARE\Classes\Installer\Products\',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products\'
     )
 
-    # Create an empty array to hold all the uninstallation targets and compose the entries into the target array
     $targets = @()
-
     if ($vmware_tools_ids) {
         foreach ($item in $reg_targets) {
             $targets += $item + $vmware_tools_ids.reg_id
         }
-        # Add the MSI installer ID regkey
         $targets += "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{$($vmware_tools_ids.msi_id)}"
     }
 
-    # Create a list of services to stop and remove
-    #$services = Get-Service -DisplayName "VMware*"
     $services = @()
     $services += Get-Service -Name VMTools -ErrorAction SilentlyContinue
     $services += Get-Service -Name VGAuthService -ErrorAction SilentlyContinue
@@ -109,250 +94,226 @@ if ($vmToolsGUID) {
     $services += Get-Service -Name vmvss -ErrorAction SilentlyContinue
     $services += Get-Service -Name GISvc -ErrorAction SilentlyContinue
 
-    # Warn the user about what is about to happen
-    # Takes only y for an answer, bails otherwise.
-
     if (!$targets -and !$services) {
-        Write-Host "VMware tools not found" -ForegroundColor Green
+        Write-Host 'VMware Tools not found'
     }
     else {
-
-        #endregion code Finding the VMware tools services, files and registry _step1
-
-        # step2
-        #region code Stop and removing the services _step2
-        Write-Host "Step-2 : Stop and removing the VMware tools services " -ForegroundColor Yellow
+        # Step 2: Stop and remove VMware Tools services.
+        Write-Host 'Step-2: Stopping and removing VMware Tools services' -ForegroundColor Yellow
         foreach ($s in $services) {
             $S_displayname = $s.DisplayName
             $S_name = $s.Name
             $S_status = $s.Status
-            write-host " "
-            write-host "@@@ $S_displayname @@@"
-            write-host " Services $S_displayname found on server and status $S_status"
+            Write-Host "`n@@@ $S_displayname @@@"
+            Write-Host "Service $S_displayname found on server with status $S_status"
 
-            # Stop all running VMware Services
             try {
-                $s | Stop-Service -Confirm:$false -ErrorAction SilentlyContinue
-                write-host " Stop process service $S_displayname :success"
+                $s | Stop-Service -Confirm:$false -ErrorAction Stop
+                Write-Host "Stopped service $S_displayname: success"
             }
             catch {
-                write-host " Stop process $S_displayname :failed"
+                Write-Host "Failed to stop service $S_displayname: $_"
             }
 
-            # Cover for Remove-Service not existing in PowerShell versions < 6.0
-            if (Get-Command Remove-Service -errorAction SilentlyContinue) {
+            if (Get-Command Remove-Service -ErrorAction SilentlyContinue) {
                 try {
-                    $s | Remove-Service -Confirm:$false -ErrorAction SilentlyContinue
-                    write-host " Removed services $S_name :success"
+                    $s | Remove-Service -Confirm:$false -ErrorAction Stop
+                    Write-Host "Removed service $S_name: success"
                 }
                 catch {
-                    write-host " Removed services $S_name :failed"
+                    Write-Host "Failed to remove service $S_name: $_"
                 }
             }
             else {
                 try {
-                    sc.exe DELETE $($s.Name)
-                    write-host " Dellete services $S_name :success"
+                    & sc.exe DELETE $s.Name | Out-Null
+                    if ($LASTEXITCODE -ne 0) { throw "sc.exe returned exit code $LASTEXITCODE" }
+                    Write-Host "Deleted service $S_name: success"
                 }
                 catch {
-                    write-host " Dellete services $S_name :failed"
+                    Write-Host "Failed to delete service $S_name: $_"
                 }
             }
         }
 
-        #endregion code Stop the services
-
-        # step3
-        #region code Remove all the Vmxnet3 drivers _step3
-        Write-Host " "
-        Write-Host "Step-3 : Removing the Vmxnet3 drivers " -ForegroundColor Yellow
+        # Step 3: Remove Vmxnet3 drivers.
+        Write-Host ' ' 
+        Write-Host 'Step-3: Removing Vmxnet3 drivers' -ForegroundColor Yellow
         $drivers = pnputil /enum-drivers
-        $vmxnet3INF = $drivers -match "Published Name" |
+        $vmxnet3INF = $drivers -match 'Published Name' |
             ForEach-Object {
                 $i = [array]::IndexOf($drivers, $_)
                 $block = $drivers[$i..($i + 5)]
-                if ($block -match "vmxnet3.inf") {
-                    ($_ -split ":")[1].Trim()
+                if ($block -match 'vmxnet3.inf') {
+                    ($_ -split ':')[1].Trim()
                 }
             }
 
         if ($vmxnet3INF) {
-            try { Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Services\vmxnet*" -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+            try {
+                Remove-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\vmxnet*' -Recurse -Force -ErrorAction SilentlyContinue
+            } catch {}
             try {
                 pnputil /delete-driver $vmxnet3INF /uninstall /force
-                write-host " Removed the Vmxnet3 drivers :success"
+                if ($LASTEXITCODE -ne 0) { throw "pnputil returned exit code $LASTEXITCODE" }
+                Write-Host 'Removed the Vmxnet3 drivers: success'
             }
             catch {
-                write-host " Removed the Vmxnet3 drivers :failed"
+                Write-Host "Failed to remove the Vmxnet3 drivers: $_"
             }
         }
         else {
-            write-host " Vmxnet3 drivers Not found"
+            Write-Host 'Vmxnet3 drivers not found'
         }
-        #endregion code Remove all the Vmxnet3 drivers
 
-        # get the vmtools process  and delete
+        # Stop the vmtoolsd process.
         try {
-            Get-Process vmtoolsd -ErrorAction SilentlyContinue | Stop-Process -Force
-            write-host " Delleted Vmtools process 'vmtoolsd'  :Success"
+            Get-Process vmtoolsd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction Stop
+            Write-Host "Stopped Vmtools process 'vmtoolsd': success"
         }
         catch {
-            write-host " Delleted Vmtools process 'vmtoolsd' :failed"
+            Write-Host "Could not stop Vmtools process 'vmtoolsd': $_"
         }
 
-        # step4
-        #region code Remove the registry files -step4
-        Write-Host " "
-        Write-Host "Step-4 : Removing the VMware tools from registry files " -ForegroundColor Yellow
-
+        # Step 4: Remove registry entries.
+        Write-Host ' '
+        Write-Host 'Step-4: Removing VMware Tools registry entries' -ForegroundColor Yellow
         foreach ($item in $targets) {
             if (Test-Path $item) {
                 try {
-                    Remove-Item -Path $item -Recurse -ErrorAction SilentlyContinue
-                    write-host " Dellete $item  :success"
+                    Remove-Item -Path $item -Recurse -ErrorAction Stop
+                    Write-Host "Deleted $item: success"
                 }
                 catch {
-                    write-host " Dellete $item  :failed"
+                    Write-Host "Failed to delete $item: $_"
                 }
             }
         }
 
         try {
-            Remove-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "VMware User Process" -ErrorAction SilentlyContinue
-            write-host " Removed the Vmware tolls from startup :success"
+            Remove-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'VMware User Process' -ErrorAction Stop
+            Write-Host 'Removed VMware Tools startup entry'
         }
         catch {
-            write-host " Removed the Vmware tolls from startup  :failed"
+            Write-Host "Could not remove VMware Tools startup entry: $_"
         }
 
-        try {
-            Remove-Item "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\vmStatsProvider" -Recurse -Force -ErrorAction Stop
-            write-host "Removed-Item HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\vmStatsProvider"
+        foreach ($eventLogKey in @(
+            'HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\vmStatsProvider',
+            'HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\vmtools',
+            'HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\VMware Tools'
+        )) {
+            try { Remove-Item $eventLogKey -Recurse -Force -ErrorAction Stop } catch {}
         }
-        catch {}
-        try {
-            Remove-Item "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\vmtools" -Recurse -Force -ErrorAction Stop
-            write-host "Removed-Item HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\vmtools"
-        }
-        catch {}
-        try {
-            Remove-Item "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\VMware Tools" -Recurse -Force -ErrorAction Stop
-            write-host "Removed-Item HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\VMware Tools"
-        }
-        catch {}
 
-        #endregion code Remove the registry files
+        # Step 5: Delete VMware Tools folders.
+        Write-Host ' '
+        Write-Host 'Step-5: Deleting VMware Tools folders' -ForegroundColor Yellow
+        $VMware_Tools_Directory = 'C:\Program Files\VMware\VMware Tools'
+        $VMware_Common_Directory = 'C:\Program Files\Common Files\VMware'
 
-        # step5
-        #region code Deleting the VMware tools folder in Program files _step5
-        Write-Host " "
-        Write-Host "Step-5 : Deleting the VMware tools folder in Program files " -ForegroundColor Yellow
-        $VMware_Tools_Directory = "C:\Program Files\VMware\VMware Tools"
-        $VMware_Common_Directory = "C:\Program Files\Common Files\VMware"
-
-        # Remove the VMware Tools directory
         if (Test-Path $VMware_Tools_Directory) {
             try {
-                Remove-Item -Path $VMware_Tools_Directory -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -Path $VMware_Tools_Directory -Recurse -Force -ErrorAction Stop
             }
             catch {
                 cmd /c "rd /s /q `"$VMware_Tools_Directory`""
             }
         }
         if (Test-Path $VMware_Tools_Directory) {
-            Write-Host " Delete the Vmware tools folder in Program files :Failed"
+            Write-Host 'Delete the VMware Tools folder in Program Files: failed'
         }
         else {
-            Write-Host " Delete the Vmware tools folder in Program files :success"
+            Write-Host 'Delete the VMware Tools folder in Program Files: success'
         }
 
-        #Remove the Common_Directory
         if (Test-Path $VMware_Common_Directory) {
             try {
-                Remove-Item -Path $VMware_Common_Directory -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -Path $VMware_Common_Directory -Recurse -Force -ErrorAction Stop
             }
             catch {
                 cmd /c "rd /s /q `"$VMware_Common_Directory`""
             }
         }
-
         if (Test-Path $VMware_Common_Directory) {
-            Write-Host " Delete the Vmware tools files from VMware_Common_Directory :Failed"
+            Write-Host 'Delete the VMware Common Files folder: failed'
         }
         else {
-            Write-Host " Delete the Vmware tools files from VMware_Common_Directory :success"
+            Write-Host 'Delete the VMware Common Files folder: success'
         }
 
-        # Common_Directory try to delete 6 times in 6 min
+        # Retry deleting the VMware Tools folder for up to six minutes.
         if (Test-Path $VMware_Tools_Directory) {
             $n = 0
-            $L = 6
+            $delete = $null
             do {
-                $Ln = $L --
-                Write-Host " Trying to delete Vmware tools folder in Program files. Wait $Ln minutes  "
-                Start-Sleep 60
-                $N ++
-                if ($N -ge 6) {
+                $n++
+                Write-Host "Retrying VMware Tools folder deletion (attempt $n of 6); waiting one minute."
+                Start-Sleep -Seconds 60
+                if ($n -ge 6) {
                     try { Get-Process vmtoolsd -ErrorAction SilentlyContinue | Stop-Process -Force } catch {}
                     try { Get-ChildItem $VMware_Tools_Directory -Recurse -Force | ForEach-Object { $_.Attributes = 'Normal' } } catch {}
                 }
 
-                try { Remove-Item -Path $VMware_Tools_Directory -Recurse -Force -ErrorAction SilentlyContinue }
+                try { Remove-Item -Path $VMware_Tools_Directory -Recurse -Force -ErrorAction Stop }
                 catch { cmd /c "rd /s /q `"$VMware_Tools_Directory`"" }
+
                 if (Test-Path $VMware_Tools_Directory) {
-                    Write-Host " Delete the Vmware tools folder in Program files :failed"
+                    Write-Host 'Delete the VMware Tools folder: still present'
                 }
                 else {
-                    Write-Host " Delete the Vmware tools folder in Program files :Success"
-                    $delete = "Yes"
+                    Write-Host 'Delete the VMware Tools folder: success'
+                    $delete = 'Yes'
                 }
             }
-            until ($delete -eq "Yes" -or $n -eq 6)
+            until ($delete -eq 'Yes' -or $n -ge 6)
         }
 
-        #endregion code Deleting the VMware tools folder in Program files _step5
-
-        Write-Host " "
-        Write-Host "Please Reboot the server to complete removal." -ForegroundColor Yellow
+        Write-Host ' '
+        Write-Host 'A server reboot may be required to complete removal.' -ForegroundColor Yellow
     }
 
-    # step6
-    #region code ##### Validating VMware tool Uninstallation _step6 #####
-    Write-Host "Step-6 : Validating VMware tool Uninstallation" -ForegroundColor Yellow
-    $ToolsRemove_status = "Success"
+    # Step 6: Validate removal.
+    Write-Host 'Step-6: Validating VMware Tools uninstallation' -ForegroundColor Yellow
     $vmware_tools_ids = Get-VMwareToolsInstallerID
     if ($vmware_tools_ids) {
-        $ToolsRemove_status = "Failed"
-        $comment = "VMware tool not removed"
-        Write-Host "VMware tool Uninstallation : Failed" -ForegroundColor Magenta
+        $ToolsRemove_status = 'Failed'
+        $comment = 'VMware Tools registry product entry remains.'
+        Write-Host 'VMware Tools uninstallation: failed' -ForegroundColor Magenta
     }
     else {
         $services = Get-Service -Name VMTools -ErrorAction SilentlyContinue
         if ($services) {
-            $ToolsRemove_status = "Failed"
-            $comment = "VMware tool removed but service not removed"
-            Write-Host "VMware tool removed but service not removed : Failed" -ForegroundColor Magenta
+            $ToolsRemove_status = 'Failed'
+            $comment = 'VMware Tools product entry removed, but the VMTools service remains.'
+            Write-Host 'VMware Tools service remains: failed' -ForegroundColor Magenta
+        }
+        elseif (Test-Path $VMware_Tools_Directory) {
+            $ToolsRemove_status = 'Failed'
+            $comment = 'VMware Tools product entry and service removed, but the installation folder remains.'
+            Write-Host 'VMware Tools folder remains: failed' -ForegroundColor Magenta
         }
         else {
-            if (Test-Path $VMware_Tools_Directory -ErrorAction Stop) {
-                $ToolsRemove_status = "Failed"
-                $comment = "VMware tool and service removed but floder not removed"
-                Write-Host "VMware tool and service removed but floder not removed : Failed" -ForegroundColor Magenta
-            }
-            else {
-                $ToolsRemove_status = "Success"
-                Write-Host "VMware tool Uninstallation : Success" -ForegroundColor green
-            }
+            $ToolsRemove_status = 'Success'
+            $comment = 'VMware Tools removal validated.'
+            Write-Host 'VMware Tools uninstallation: success' -ForegroundColor Green
         }
     }
-    #endregion code ##### Validating VMware tool Uninstallation #####
-
 }
 else {
-    Write-Host " VMware tool Uninstallation: VMware Tools is not installed." -ForegroundColor Green
+    $ToolsRemove_status = 'Success'
+    $comment = 'VMware Tools is not installed.'
+    Write-Host 'VMware Tools is not installed.' -ForegroundColor Green
 }
 
-Write-Host "ToolsRemove_status  $ToolsRemove_status "
-Write-Host "comment $comment"
+Write-Host "ToolsRemove_status: $ToolsRemove_status"
+Write-Host "comment: $comment"
 
-try { Stop-Transcript -ErrorAction ignore | Out-Null } catch {}
+try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
+
+if ($ToolsRemove_status -eq 'Success') {
+    exit 0
+}
+else {
+    exit 1
+}
